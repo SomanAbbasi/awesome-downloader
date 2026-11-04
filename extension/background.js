@@ -8,19 +8,32 @@ let serial = Promise.resolve();
 // Credentials stay in worker memory and are used only for the selected observed URL.
 const requestContext = new Map();
 const youtubePlayers=new Map(), youtubeObserved=new Map(), youtubeSabrObserved=new Map(), youtubeSabrSeed=new Map();
+function youtubeVideoId(url) {
+  try {
+    const u = new URL(url);
+    if (!['www.youtube.com', 'youtube.com', 'm.youtube.com'].includes(u.hostname)) return null;
+    const id = u.searchParams.get('v') || /^\/shorts\/([\w-]{11})/.exec(u.pathname)?.[1];
+    return /^[\w-]{11}$/.test(id || '') ? id : null;
+  } catch { return null; }
+}
 function rememberSabrCapture(tabId,seed){
-  youtubeSabrObserved.set(tabId,seed);
+  const videoId = youtubePlayers.get(tabId)?.videoId;
+  const capture = { ...seed, videoId };
+  youtubeSabrObserved.set(tabId,capture);
   if(youtubeSabrObserved.size>50)youtubeSabrObserved.delete(youtubeSabrObserved.keys().next().value);
-  updateSession(SABR_KEY,map=>{map[tabId]={url:seed.url,requestBody:seed.requestBody};}).catch(()=>{});
+  updateSession(SABR_KEY,map=>{map[tabId]={url:seed.url,requestBody:seed.requestBody,videoId};}).catch(()=>{});
 }
 async function sabrCapture(tabId){
+  const currentVideoId = youtubePlayers.get(tabId)?.videoId;
   const live=youtubeSabrObserved.get(tabId);
-  if(live)return live;
+  if(live && (!currentVideoId || !live.videoId || live.videoId === currentVideoId))return live;
   await serial;
   try{
     const data=await api.storage.session.get(SABR_KEY),stored=data[SABR_KEY]?.[tabId];
     if(stored&&typeof stored.url==='string'&&typeof stored.requestBody==='string'){
-      const capture={...stored,tabId};youtubeSabrObserved.set(tabId,capture);return capture;
+      if(!currentVideoId || !stored.videoId || stored.videoId === currentVideoId){
+        const capture={...stored,tabId};youtubeSabrObserved.set(tabId,capture);return capture;
+      }
     }
   }catch{}
 }
@@ -144,7 +157,7 @@ api.webRequest.onHeadersReceived.addListener(details => {
   const capturedSabr=globalThis.youtubeMedia?.sabrUrl(details.url);
   if(capturedSabr && details.tabId>=0 && [200,206].includes(details.statusCode)){
     const seed=youtubeSabrSeed.get(details.requestId);
-    if(seed?.tabId===details.tabId&&seed.url===capturedSabr)rememberSabrCapture(details.tabId,seed);
+    if(seed?.tabId===details.tabId && (!seed.url || seed.url===capturedSabr || new URL(seed.url).pathname===new URL(capturedSabr).pathname))rememberSabrCapture(details.tabId,{...seed,url:capturedSabr||seed.url});
     youtubeSabrSeed.delete(details.requestId);
   }
   if(captured && details.tabId>=0 && [200,206].includes(details.statusCode) && /^(video|audio)\//i.test(mime)) {
@@ -159,7 +172,22 @@ api.webRequest.onHeadersReceived.addListener(details => {
   if(/\.m3u8(?:[?#]|$)/i.test(details.url)||/mpegurl/i.test(mime))discoverHls(details.tabId,details.url);
 }, {urls: ['http://*/*', 'https://*/*']}, ['responseHeaders']);
 api.tabs.onRemoved.addListener(tabId => {youtubePlayers.delete(tabId);youtubeObserved.delete(tabId);clearSabrCapture(tabId);requestContext.delete(tabId);hlsSeen.delete(tabId);updateCache(map => { delete map[tabId]; }).catch(() => {});});
-api.tabs.onUpdated.addListener((tabId, change) => { if (change.status === 'loading') {youtubePlayers.delete(tabId);youtubeObserved.delete(tabId);clearSabrCapture(tabId);requestContext.delete(tabId);hlsSeen.delete(tabId);updateCache(map => { delete map[tabId]; }).catch(() => {});} });
+api.tabs.onUpdated.addListener((tabId, change, tab) => {
+  if (change.status === 'loading') {
+    const nextUrl = change.url || tab?.url;
+    const nextVideoId = nextUrl ? youtubeVideoId(nextUrl) : null;
+    const currentVideo = youtubePlayers.get(tabId);
+    const sameVideo = Boolean(currentVideo && nextVideoId && currentVideo.videoId === nextVideoId);
+    if (!sameVideo) {
+      youtubePlayers.delete(tabId);
+      youtubeObserved.delete(tabId);
+      clearSabrCapture(tabId);
+    }
+    requestContext.delete(tabId);
+    hlsSeen.delete(tabId);
+    updateCache(map => { delete map[tabId]; }).catch(() => {});
+  }
+});
 api.runtime.onInstalled.addListener(async () => {
   try {
     await api.contextMenus.removeAll();

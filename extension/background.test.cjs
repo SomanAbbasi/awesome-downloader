@@ -90,6 +90,35 @@ test('SABR choices are hidden until the browser captures a usable session',async
  await h.request({action:'playerResponse',data:{videoId:'wLdZWyLOJCI',title:'Captured',sabr:true,sabrUrl:'https://r1.googlevideo.com/videoplayback?id=asset&sabr=1&expire=9999999999',ustreamerConfig:'AQID',clientName:1,clientVersion:'2.20261022.00.00',formats:[{itag:137,mimeType:'video/mp4',height:1080,qualityLabel:'1080p',bitrate:3000000},{itag:140,mimeType:'audio/mp4',bitrate:128000}]}},sender);
  const result=await h.request({action:'listForFrame'},sender);assert.equal(result.items.length,0);assert.match(result.notice,/captured/i);
 });
+test('captured YouTube session survives playlist navigation within the same video (#42)',async()=>{
+ const sender={id:'extension-id',tab:{id:30,url:'https://www.youtube.com/watch?v=k1FutayH0i8&list=RDk1FutayH0i8&start_radio=1'}},stream='https://r1.googlevideo.com/videoplayback?id=asset&sabr=1&expire=9999999999';
+ const player={videoId:'k1FutayH0i8',title:'Captured Playlist Track',sabr:true,sabrUrl:stream,ustreamerConfig:'AQID',clientName:1,clientVersion:'2.20261022.00.00',formats:[{itag:137,mimeType:'video/mp4; codecs="avc1"',height:1080,qualityLabel:'1080p',bitrate:3000000,lastModified:'1',approxDurationMs:'10000'},{itag:140,mimeType:'audio/mp4; codecs="mp4a.40.2"',audioQuality:'AUDIO_QUALITY_MEDIUM',bitrate:128000,lastModified:'1',approxDurationMs:'10000'}]};
+ const h=harness();
+ await h.request({action:'playerResponse',data:player},sender);
+ h.events.beforeRequest({requestId:'playlist-req',tabId:30,url:stream,requestBody:{raw:[{bytes:Uint8Array.from([1,2,3]).buffer}]}});
+ h.events.response({requestId:'playlist-req',tabId:30,url:stream,statusCode:200,type:'xmlhttprequest',responseHeaders:[]});
+ h.events.updated(30,{status:'loading',url:'https://www.youtube.com/watch?v=k1FutayH0i8&list=RDk1FutayH0i8&index=1'},{url:'https://www.youtube.com/watch?v=k1FutayH0i8&list=RDk1FutayH0i8&index=1'});
+ const result=await h.request({action:'listForFrame'},sender);
+ const item=result.items.find(value=>value.quality==='1080p');
+ assert.ok(item,'1080p format should be selectable without notice');
+ assert.equal(result.notice,undefined);
+ await h.request({action:'download',item:{...item,startNow:true}},sender);
+ assert.equal(h.nativeRequests[0].sabr.videoItag,137);
+ assert.equal(h.nativeRequests[0].sabr.requestBody,'AQID');
+});
+test('captured YouTube session is cleared when navigating to a different video',async()=>{
+ const sender={id:'extension-id',tab:{id:31,url:'https://www.youtube.com/watch?v=firstVideo1'}},stream='https://r1.googlevideo.com/videoplayback?id=asset&sabr=1&expire=9999999999';
+ const player={videoId:'firstVideo1',title:'First Video',sabr:true,sabrUrl:stream,ustreamerConfig:'AQID',clientName:1,clientVersion:'2.20261022.00.00',formats:[{itag:137,mimeType:'video/mp4; codecs="avc1"',height:1080,qualityLabel:'1080p',bitrate:3000000,lastModified:'1',approxDurationMs:'10000'},{itag:140,mimeType:'audio/mp4; codecs="mp4a.40.2"',audioQuality:'AUDIO_QUALITY_MEDIUM',bitrate:128000,lastModified:'1',approxDurationMs:'10000'}]};
+ const h=harness();
+ await h.request({action:'playerResponse',data:player},sender);
+ h.events.beforeRequest({requestId:'first-req',tabId:31,url:stream,requestBody:{raw:[{bytes:Uint8Array.from([1,2,3]).buffer}]}});
+ h.events.response({requestId:'first-req',tabId:31,url:stream,statusCode:200,type:'xmlhttprequest',responseHeaders:[]});
+ h.events.updated(31,{status:'loading',url:'https://www.youtube.com/watch?v=secondVideo'},{url:'https://www.youtube.com/watch?v=secondVideo'});
+ const item={url:stream,quality:'1080p',sabrSelection:{videoItag:137,audioItag:140}};
+ const rejected=await h.request({action:'download',item:{...item,startNow:true}},{...sender,tab:{id:31,url:'https://www.youtube.com/watch?v=secondVideo'}});
+ assert.equal(rejected.ok,false);
+ assert.match(rejected.error,/expired/i);
+});
 test('duplicate browser downloads share one native handoff',async()=>{
  const h=harness();
  const first=h.createDownload({id:1,url:'https://example.com/file.bin',filename:'C:\\Downloads\\file.bin'}),second=h.createDownload({id:2,url:first.url,filename:first.filename});
